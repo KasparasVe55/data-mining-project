@@ -1,0 +1,14 @@
+# R session files (recreated every time R runs, cause constant conflicts)
+.Rhistory
+.RData
+.Rapp.history
+
+# RStudio project settings (personal to each user)
+.Rproj.user/
+
+# R environment / secrets (may contain API keys or passwords)
+.Renviron
+
+# OS junk
+.DS_Store
+Thumbs.db
