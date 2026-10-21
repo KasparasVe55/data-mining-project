@@ -11,6 +11,30 @@ Repo for data mining group project
 
 > GitHub rejects files over 100 MB. If a dataset is bigger than that, share it another way and don't commit it.
 
+## Data
+
+`data/ess_baltic_R9-R11.csv` — adapted from the European Social Survey (ESS):
+ESS Round 9 (edition 3.3), Round 10 (edition 3.3), Round 10 self-completion (edition 3.2)
+and Round 11 (edition 4.2); countries EE, LT, LV; selected variables only
+(original file name: `ESS9e03_3-ESS10e03_3-ESS10SCe03_2-ESS11e04_2-subset.csv`).
+
+- 12,791 respondents (LT 4,859, LV 3,193, EE 4,739).
+- Source: [ESS Data Portal](https://ess.sikt.no/). Licence: [CC BY-NC-SA 4.0](https://europeansocialsurvey.org/node/58)
+  (non-commercial use, cite the source).
+- ⚠️ **Keep this repository private.** ESS asks not to publish its datasets on external websites.
+- Latvia Round 10 comes from the self-completion file (web/paper, not face-to-face) — answers may differ because of the survey mode.
+
+### How to use the data (everyone the same way)
+
+1. Run `scripts/01_clean.R` once. It turns ESS missing codes (7/8/9, 77/88/99, 666–999) into `NA`,
+   makes age groups and simple yes/no variables, and saves `data/ess_baltic_clean.rds`
+   (this file is not uploaded — everyone makes it on their own computer).
+2. Start your own script with `source("scripts/survey_design.R")`. You get:
+   - `d` = the clean data,
+   - `des` = the data with survey weights (`anweight`) for the `survey` package.
+3. Packages needed (install once): `install.packages(c("dplyr", "survey"))`
+4. Working directory in R must be the repository folder (`data-mining-project`).
+
 ## How to contribute
 
 ### 1. One-time setup

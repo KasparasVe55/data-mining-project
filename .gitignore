@@ -12,3 +12,6 @@
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Clean data made by scripts/01_clean.R (everyone creates it locally)
+data/*.rds
