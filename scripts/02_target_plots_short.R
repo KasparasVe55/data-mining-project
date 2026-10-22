@@ -18,7 +18,6 @@ dy <- d %>% filter(!is.na(stflife))
 num_vars <- c(
   agea    = "Age",
   eisced  = "Education (1-7)",
-  domicil = "Place (1 big city - 5 farm)",
   hincfel = "Income feeling (1 good - 4 bad)",
   health  = "Health (1 very good - 5 very bad)",
   sclmeet = "Meets friends (1 never - 7 daily)",
@@ -107,7 +106,7 @@ binned_plot <- function(v) {
 
 binned_list <- lapply(names(num_vars), binned_plot)
 ggsave(file.path(out_dir, "4_scatter_binned.pdf"),
-       arrangeGrob(grobs = binned_list, ncol = 5), width = 12, height = 7)
+       arrangeGrob(grobs = binned_list, ncol = 4), width = 10, height = 9)
 
 
 # 5. Correlation matrix (Spearman, unweighted)
