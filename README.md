@@ -19,9 +19,16 @@ and Round 11 (edition 4.2); countries EE, LT, LV; selected variables only
 (original file name: `ESS9e03_3-ESS10e03_3-ESS10SCe03_2-ESS11e04_2-subset.csv`).
 
 - 12,791 respondents (LT 4,859, LV 3,193, EE 4,739).
-- Source: [ESS Data Portal](https://ess.sikt.no/). Licence: [CC BY-NC-SA 4.0](https://europeansocialsurvey.org/node/58)
-  (non-commercial use, cite the source).
-- ⚠️ **Keep this repository private.** ESS asks not to publish its datasets on external websites.
+- Source: the original ESS datasets are free to download from the [ESS Data Portal](https://ess.sikt.no/).
+- Licence: ESS data are licensed under [CC BY-NC-SA 4.0](https://europeansocialsurvey.org/node/58).
+  This adapted subset is shared under the same licence (non-commercial use, attribution, share alike).
+- This subset was prepared by the project team and is not endorsed by ESS ERIC,
+  which is not responsible for datasets stored outside the ESS Data Portal.
+- Please cite the original data:
+  - ESS ERIC (2026). ESS9 – integrated file, edition 3.3 [Data set]. Sikt. https://doi.org/10.21338/ess9e03_3
+  - ESS ERIC (2025). ESS10 – integrated file, edition 3.3 [Data set]. Sikt. https://doi.org/10.21338/ess10e03_3
+  - ESS ERIC (2025). ESS10 Self-completion – integrated file, edition 3.2 [Data set]. Sikt. https://doi.org/10.21338/ess10sce03_2
+  - ESS ERIC (2026). ESS11 – integrated file, edition 4.2 [Data set]. Sikt. https://doi.org/10.21338/ess11e04_2
 - Latvia Round 10 comes from the self-completion file (web/paper, not face-to-face) — answers may differ because of the survey mode.
 
 ### How to use the data (everyone the same way)
@@ -46,7 +53,7 @@ git clone https://github.com/KasparasVe55/data-mining-project.git
 cd data-mining-project
 ```
 
-When git asks you to log in, sign in to your GitHub account (you need to have accepted the collaborator invite first).
+To push changes, sign in to your GitHub account when git asks (you need to have accepted the collaborator invite first).
 
 ### 2. Every time you start working
 
