@@ -39,8 +39,16 @@ and Round 11 (edition 4.2); countries EE, LT, LV; selected variables only
 2. Start your own script with `source("scripts/survey_design.R")`. You get:
    - `d` = the clean data,
    - `des` = the data with survey weights (`anweight`) for the `survey` package.
-3. Packages needed (install once): `install.packages(c("dplyr", "survey"))`
-4. Working directory in R must be the repository folder (`data-mining-project`).
+3. For models, run `scripts/03_train_test_split.R` once (after step 1). It splits the data 80:20
+   and saves `data/ess_train.rds` and `data/ess_test.rds` (not uploaded either).
+   - The split is balanced by life satisfaction, country and round. Rows without `stflife` are dropped.
+   - `ess_train.rds` has a `fold` column for cross-validation. Everyone uses the same folds,
+     so don't make your own. The number of folds is set by `n_folds` at the top of the script.
+   - Use `ess_test.rds` only once, at the end, to compare the final models.
+   - Use the weights (`anweight`) when fitting models and when calculating errors.
+   - If `01_clean.R` changes, run this script again.
+4. Packages needed (install once): `install.packages(c("dplyr", "survey"))`
+5. Working directory in R must be the repository folder (`data-mining-project`).
 
 ## How to contribute
 
