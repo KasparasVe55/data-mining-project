@@ -1,14 +1,22 @@
 # Train/test split 80:20 and CV folds in the train set
 # run 01_clean.R first, working directory = repo folder
-# output: data/ess_train.rds (with fold column), data/ess_test.rds
+# output: data/ess_train.rds (with fold and imputed columns), data/ess_test.rds
 #         (not uploaded, everyone makes them)
 # same seed = everyone gets the same split and folds
+# missing predictors are filled with typical values from the train set,
+# imputed = TRUE marks rows where something was filled (for complete case checks)
 
 library(dplyr)
 
 # number of CV folds, not decided yet (10 or 4)
 # changing it changes only the folds, not the train/test split
 n_folds <- 10
+
+# predictors used in the models (all of them, reduced later by backward selection)
+predictors <- c("agea", "female", "hincfel", "activity_grp", "health", "sclmeet",
+                "partner", "trstprl", "rlgdgr", "eisced", "domicil", "russian_home",
+                "inprdsc", "sclact", "hhmmb", "ppltrst", "stfeco", "stfhlth",
+                "aesfdrk", "ever_unemployed", "cntry", "round")
 
 # weighted mean and weighted % in each group of variable v, for the checks
 wmean  <- function(x, v) weighted.mean(x[[v]], x$anweight, na.rm = TRUE)
@@ -43,12 +51,35 @@ train <- train %>%
   ungroup()
 
 
-# 3. checks
+# 3. missing predictors
+# mark rows with at least one missing predictor before filling them,
+# complete cases later = filter(!imputed), same split and folds
+train$imputed <- !complete.cases(train[predictors])
+test$imputed  <- !complete.cases(test[predictors])
+
+# typical value from the train set only (median for numbers,
+# most common category for factors), the same values are used for test
+typical <- function(x) {
+  if (is.numeric(x)) round(median(x, na.rm = TRUE)) else names(which.max(table(x)))
+}
+fill_values <- lapply(train[predictors], typical)
+
+for (v in predictors) {
+  train[[v]][is.na(train[[v]])] <- fill_values[[v]]
+  test[[v]][is.na(test[[v]])]   <- fill_values[[v]]
+}
+
+
+# 4. checks
 stopifnot(nrow(train) + nrow(test) == nrow(d),
-          all(train$fold %in% 1:n_folds))
+          all(train$fold %in% 1:n_folds),
+          !anyNA(train[predictors]),
+          !anyNA(test[predictors]))
 
 cat("Train:", nrow(train), " Test:", nrow(test),
-    " Test share:", round(nrow(test) / nrow(d), 3), "\n\n")
+    " Test share:", round(nrow(test) / nrow(d), 3), "\n")
+cat("Rows with imputed values - train:", sum(train$imputed),
+    " test:", sum(test$imputed), "\n\n")
 
 cat("Rows per fold:\n")
 print(table(train$fold))
