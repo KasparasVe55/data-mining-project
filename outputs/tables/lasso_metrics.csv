@@ -1,0 +1,3 @@
+"Model","RMSE","MAE","Rsquared"
+"Lasso",1.7824,1.3609,0.3791
+"Lasso 1se",1.8045,1.376,0.3636
