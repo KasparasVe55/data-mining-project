@@ -1,0 +1,176 @@
+---
+title: "OLS Regression"
+format: pdf
+editor: visual
+---
+
+```{r}
+# OLS regression of life satisfaction (stflife) on all predictors
+# run 03_train_test_split.R first, working directory = repo folder
+# needs: install.packages(c("dplyr", "car", "broom"))
+# output: outputs/figures/models/ols_*.pdf
+#         outputs/tables/ols_coefficients.csv, outputs/tables/ols_metrics.csv
+
+library(dplyr)
+library(car)    # vif(), Anova()
+library(broom)  # tidy()
+
+# ---- settings -------------------------------------------------------------
+use_weights <- FALSE   # TRUE = weight the fit by anweight (the lasso script does this)
+
+outcome <- "stflife"
+predictors <- c("agea", "female", "hincfel", "activity_grp", "health", "sclmeet",
+                "partner", "trstprl", "rlgdgr", "eisced", "domicil", "russian_home",
+                "inprdsc", "sclact", "hhmmb", "ppltrst", "stfeco", "stfhlth",
+                "aesfdrk", "ever_unemployed", "cntry", "round")
+
+# variables treated as categories (each gets dummy variables)
+cat_vars <- c("cntry", "round", "activity_grp", "domicil")
+
+fig_dir <- "outputs/figures/models"
+tab_dir <- "outputs/tables"
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(tab_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---- 1. load data ---------------------------------------------------------
+train <- readRDS("ess_baltic_R9-R11_train.rds")
+test  <- readRDS("ess_baltic_R9-R11_test.rds")
+
+# categorical variables become factors; the test set uses the train levels
+for (v in union(intersect(cat_vars, predictors),
+                predictors[sapply(train[predictors], is.character)])) {
+  train[[v]] <- factor(train[[v]])
+  test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
+}
+
+# fold and imputed columns are NOT used in the model
+fml <- reformulate(predictors, response = outcome)
+w   <- if (use_weights) train$anweight else NULL
+
+# ---- 2. fit OLS on the training set --------------------------------------
+fit <- lm(fml, data = train, weights = w)
+
+summary(fit)
+confint(fit)
+
+# one test per variable (the summary only compares each dummy with its reference)
+Anova(fit, type = 2)
+
+# standardized coefficient = coefficient x (weighted) sd of its column,
+# so variables on different scales can be compared (same idea as in the lasso script)
+X   <- model.matrix(fit)[, -1]
+wn  <- train$anweight / sum(train$anweight)
+wsd <- apply(X, 2, function(x) sqrt(sum(wn * (x - sum(wn * x))^2)))
+
+coef_table <- tidy(fit, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(std_estimate = estimate * wsd[term]) %>%
+  arrange(desc(abs(std_estimate)))
+print(coef_table, n = Inf)
+
+# ---- 3. checks ------------------------------------------------------------
+# GVIF^(1/(2*Df)) is comparable across variables, values above ~2 deserve a look
+print(vif(fit))
+
+# ---- 4. plots -------------------------------------------------------------
+# The old plots looked squashed because plot(fit) put four panels into a small
+# figure. These are drawn on a bigger canvas, with small see-through points.
+# In an Rmd/Quarto document add to the chunk header: fig.width=10, fig.height=8
+
+dot <- rgb(0, 0, 0, 0.25)
+
+diag_plots <- function(fit) {
+  fv  <- fitted(fit)
+  res <- residuals(fit)
+  rs  <- rstandard(fit)
+  par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
+
+  plot(fv, res, pch = 16, cex = 0.4, col = dot,
+       xlab = "Fitted", ylab = "Residual", main = "Residuals vs fitted")
+  abline(h = 0, col = "red", lty = 2)
+  lines(lowess(fv, res), col = "blue", lwd = 2)
+
+  qqnorm(rs, pch = 16, cex = 0.4, col = dot, main = "Normal QQ plot")
+  qqline(rs, col = "red", lty = 2)
+
+  plot(fv, sqrt(abs(rs)), pch = 16, cex = 0.4, col = dot,
+       xlab = "Fitted", ylab = "sqrt(|standardized residual|)",
+       main = "Scale-location (spread of residuals)")
+  lines(lowess(fv, sqrt(abs(rs))), col = "blue", lwd = 2)
+
+  plot(hatvalues(fit), rs, pch = 16, cex = 0.4, col = dot,
+       xlab = "Leverage", ylab = "Standardized residual",
+       main = "Residuals vs leverage")
+  abline(h = 0, col = "red", lty = 2)
+  par(mfrow = c(1, 1))
+}
+
+# saved as a big PDF and also shown on screen
+pdf(file.path(fig_dir, "ols_residuals.pdf"), width = 10, height = 8)
+diag_plots(fit)
+dev.off()
+diag_plots(fit)
+
+# standardized coefficients, longest bar = strongest tendency
+pdf(file.path(fig_dir, "ols_coef.pdf"), width = 7, height = 8)
+imp <- coef_table %>% arrange(abs(std_estimate))
+par(mar = c(5, 11, 4, 2))
+barplot(imp$std_estimate, names.arg = imp$term, horiz = TRUE, las = 1,
+        cex.names = 0.7,
+        col = ifelse(imp$std_estimate > 0, "steelblue", "tomato"),
+        xlab = "Standardized coefficient (change in life satisfaction for 1 sd)",
+        main = "OLS: coefficients")
+abline(v = 0)
+dev.off()
+
+# ---- 5. test set performance ---------------------------------------------
+# same weighted metrics as in the lasso script, so the two can be compared
+wmetrics <- function(obs, pred, w) {
+  c(RMSE     = sqrt(sum(w * (obs - pred)^2) / sum(w)),
+    MAE      = sum(w * abs(obs - pred)) / sum(w),
+    Rsquared = 1 - sum(w * (obs - pred)^2) /
+                   sum(w * (obs - weighted.mean(obs, w))^2))
+}
+
+pred_test <- predict(fit, newdata = test)
+range(pred_test)                                 # how far outside 0-10?
+pred_test <- pmin(pmax(pred_test, 0), 10)        # cut to the 0-10 scale, like the lasso script
+
+metrics <- rbind(
+  `OLS (weighted)`   = wmetrics(test[[outcome]], pred_test, test$anweight),
+  `OLS (unweighted)` = wmetrics(test[[outcome]], pred_test, rep(1, nrow(test)))
+)
+metrics <- data.frame(Model = rownames(metrics), round(metrics, 4), row.names = NULL)
+print(metrics)
+
+# observed vs predicted: one box of predictions for each observed answer 0-10
+pdf(file.path(fig_dir, "ols_obs_pred.pdf"), width = 7, height = 5)
+boxplot(pred_test ~ test[[outcome]], at = sort(unique(test[[outcome]])),
+        xlim = c(-0.5, 10.5), ylim = c(0, 10),
+        xlab = "Observed", ylab = "Predicted", main = "OLS: Obs vs Pred")
+abline(0, 1, col = "red", lty = 2)
+dev.off()
+
+# ---- 6. save --------------------------------------------------------------
+write.csv(coef_table, file.path(tab_dir, "ols_coefficients.csv"), row.names = FALSE)
+write.csv(metrics,    file.path(tab_dir, "ols_metrics.csv"),      row.names = FALSE)
+
+# ---- 7. backward selection (optional) ------------------------------------
+# removes predictors one by one while AIC improves.
+# p-values after selection are too optimistic, so use them with care.
+# fit_small <- step(fit, direction = "backward")
+# summary(fit_small)
+
+# 1. raw average per country (weighted)
+train %>% group_by(cntry) %>%
+  summarise(n = n(), mean_swb = weighted.mean(stflife, anweight))
+
+# 2. do effects differ by country? (compare with the original model)
+fit_int <- update(fit, . ~ . + cntry:stfeco + cntry:hincfel + cntry:health)
+anova(fit, fit_int)     # small p = the effects differ between countries
+
+# 3. separate model per country (country itself is left out)
+fml_nc <- reformulate(setdiff(predictors, "cntry"), response = outcome)
+fits <- lapply(split(train, train$cntry), function(d) lm(fml_nc, data = d))
+lapply(fits, function(m) round(coef(summary(m))[, c(1, 4)], 3))
+```
