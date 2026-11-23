@@ -1,0 +1,386 @@
+---
+title: "Ordered logit model for life satisfaction"
+subtitle: "How the full model (M3) is fitted"
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    geometry: margin=2.5cm
+execute:
+  warning: false
+  message: false
+---
+
+This document explains how we fit the ordered logit model for life
+satisfaction (`stflife`, 0--10) in Estonia, Latvia and Lithuania (ESS rounds
+9--11). The full model (M3) uses all 22 predictors, like the other group
+models. The code is the same as in `scripts/06a_ordered_logit_full_model.R`,
+which saves the model outputs used in the group comparison. This document does not write
+any files. The wider analysis (smaller models, interactions, robustness checks,
+importance, predicted probabilities) is in `scripts/06b_ordered_logit_analysis.R`.
+
+To render it, run `01_clean.R` and `03_train_test_split.R` first, then
+`quarto render scripts/06_ordered_logit_documentation.qmd`.
+
+# Setup
+
+The code runs from the repository root, so the paths are the same as in the
+R scripts.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r packages}
+library(dplyr)
+library(MASS, exclude = "select")  # polr(), keeps dplyr's select()
+library(survey)                    # svydesign(), svyolr()
+library(car)                       # vif()
+library(ordinal)                   # clm(), partial proportional odds check
+```
+
+The train and test sets come from `03_train_test_split.R`. Missing predictor
+values are already filled there (median or mode from the train set), and the
+`imputed` column marks the filled rows.
+
+```{r data}
+train <- readRDS("data/ess_train.rds")
+test  <- readRDS("data/ess_test.rds")
+
+c(train = nrow(train), test = nrow(test),
+  train_imputed = sum(train$imputed), test_imputed = sum(test$imputed))
+```
+
+# Data and coding
+
+## Predictors
+
+The model uses the same 22 predictors as the other group models (OLS, lasso,
+tree, MARS), as defined in `03_train_test_split.R`.
+
+```{r predictors}
+predictors <- c("agea", "female", "hincfel", "activity_grp", "health", "sclmeet",
+                "partner", "trstprl", "rlgdgr", "eisced", "domicil", "russian_home",
+                "inprdsc", "sclact", "hhmmb", "ppltrst", "stfeco", "stfhlth",
+                "aesfdrk", "ever_unemployed", "cntry", "round")
+```
+
+## Coding
+
+Each predictor enters the model either as a number (one coefficient) or as a
+factor (one coefficient per level compared with a reference level).
+
+* **Numeric:** the 0--10 scales (`trstprl`, `ppltrst`, `rlgdgr`, `stfeco`,
+  `stfhlth`), the short ordered scales with roughly equal steps (`hincfel`,
+  `health`, `aesfdrk`, `inprdsc`) and the 0/1 indicators (`female`, `partner`,
+  `russian_home`, `ever_unemployed`).
+* **Factors:** variables that are categories, or ordered scales whose steps are
+  not equal.
+  * `domicil` (reference: big city), `sclact` (reference: much less than most),
+    `sclmeet` (reference: never).
+  * `eisced` (reference: level 4, upper secondary, the largest group).
+  * `hhmmb` household size, capped at 6+ because only 61 respondents live in
+    households of 7 or more (reference: lives alone).
+  * `cntry` (reference: Lithuania), `round` (reference: round 9) and
+    `activity_grp` (reference: working).
+* **Age** enters as five groups (`age5`) rather than as a number, because life
+  satisfaction is not linear in age. `age5` is rebuilt from `agea` because
+  `03_train_test_split.R` fills in `agea` but not `age5`.
+* **`lv_r10`** marks Latvia in round 10. That survey was self-completed rather
+  than face-to-face, and the indicator absorbs the mode effect so that it does
+  not distort the Latvia and round 10 coefficients.
+
+The outcome `stflife` becomes an ordered factor with levels 0 to 10. All factor
+levels are fixed in the code, so a level that is missing in the test set cannot
+shift the coding.
+
+```{r prep}
+prep <- function(x) {
+  x %>%
+    select(idno, stflife, essround, all_of(predictors), anweight, imputed) %>%
+    mutate(stflife = factor(stflife, levels = 0:10, ordered = TRUE),
+           age5    = cut(agea, breaks = c(14, 29, 44, 59, 74, Inf),
+                         labels = c("15-29", "30-44", "45-59", "60-74", "75+")),
+           domicil = factor(domicil, levels = 1:5),
+           sclact  = factor(sclact,  levels = 1:5),
+           sclmeet = factor(sclmeet, levels = 1:7),
+           eisced  = relevel(factor(eisced, levels = 1:7), ref = "4"),
+           hhmmb   = factor(pmin(hhmmb, 6), levels = 1:6, labels = c(1:5, "6+")),
+           lv_r10  = as.integer(cntry == "LV" & round == "R10 2020-22"))
+}
+
+d      <- prep(train) %>% mutate(w = anweight / mean(anweight))
+test_d <- prep(test)
+stopifnot(!anyNA(d[predictors]), !anyNA(test_d[predictors]))
+```
+
+## Weights
+
+All fits use the ESS analysis weight `anweight`, which corrects for unequal
+selection probabilities and non-response and makes the sample represent the
+population of each country. For fitting, the weight is rescaled to mean 1
+(`w`), so the weighted number of rows equals the real number of rows and the
+log-likelihood keeps its usual size. Rescaling does not change the
+coefficients.
+
+The weighted distribution of the outcome in the train set:
+
+```{r outcome}
+round(100 * prop.table(xtabs(w ~ stflife, data = d)), 1)
+```
+
+# The model
+
+## Why an ordered logit
+
+Life satisfaction is measured on an 11-point scale. The scores are ordered,
+but the distance between two neighbouring scores is not necessarily the same
+everywhere on the scale. Linear regression treats the score as a number with
+equal steps. The ordered logit uses only the order of the scores.
+
+The model assumes a latent satisfaction $y^*$ that depends on the predictors,
+and a respondent reports score $k$ when $y^*$ falls between two thresholds
+(cut-points) $\theta_{k-1}$ and $\theta_k$:
+
+$$
+P(\text{stflife} \le k \mid x) = \frac{1}{1 + \exp\{-(\theta_k - x^\top\beta)\}},
+\qquad k = 0, \dots, 9.
+$$
+
+There are 10 cut-points for 11 scores and one coefficient $\beta$ per
+predictor term. A positive $\beta$ moves the whole distribution towards higher
+scores. The odds ratio $\exp(\beta)$ is the factor by which the odds of
+scoring above any given score change for a one-unit increase in the predictor
+(or for a level compared with its reference). It is the same for all
+cut-points, which is the proportional odds assumption checked in
+@sec-checks.
+
+## Fitting
+
+`MASS::polr` fits the model by maximum likelihood with the rescaled weights.
+`Hess = TRUE` keeps the Hessian for the standard errors.
+
+```{r fit}
+m3 <- polr(stflife ~ cntry + round + lv_r10 + age5 + female + hincfel + activity_grp +
+             health + sclmeet + partner + trstprl + rlgdgr +
+             eisced + domicil + russian_home + inprdsc + sclact + hhmmb +
+             ppltrst + stfeco + stfhlth + aesfdrk + ever_unemployed,
+           data = d, weights = w, Hess = TRUE)
+
+c(rows = nrow(d), coefficients = length(coef(m3)), cutpoints = length(m3$zeta))
+```
+
+The cut-points increase from score to score, as they should:
+
+```{r cutpoints}
+round(m3$zeta, 2)
+```
+
+# Design-based standard errors
+
+The ESS is not a simple random sample. Respondents are drawn in clusters
+(primary sampling units, PSUs) within strata, and people from the same
+cluster tend to be similar. The standard errors from `polr` ignore this and
+are too small. `survey::svyolr` fits the same model and computes standard
+errors from the sampling design (PSUs, strata and `anweight`), as set up in
+`survey_design.R`. The coefficients are identical to `polr`, only the standard
+errors change.
+
+The design is built on the full cleaned data and then subset to the train
+rows. Building it on the train rows alone would drop PSUs from some strata and
+give wrong variance estimates. Strata with a single PSU are handled with the
+`adjust` option.
+
+```{r design}
+options(survey.lonely.psu = "adjust")
+full <- readRDS("data/ess_baltic_clean.rds")
+
+key <- function(x) paste(x$cntry, x$round, x$idno)
+dat <- full %>%
+  select(idno, cntry, round, psu_id, strat_id, anweight) %>%
+  mutate(key = key(.)) %>%
+  left_join(d %>% mutate(key = key(d), in_model = TRUE) %>%
+              select(-idno, -cntry, -round, -anweight, -w),
+            by = "key") %>%
+  mutate(in_model = !is.na(in_model))
+
+des <- subset(svydesign(ids = ~psu_id, strata = ~strat_id, weights = ~anweight,
+                        data = dat, nest = TRUE), in_model)
+stopifnot(nrow(des) == nrow(d))
+
+s3 <- svyolr(formula(m3), design = des)
+b  <- coef(s3)
+se <- sqrt(diag(vcov(s3)))[names(b)]
+```
+
+The design-based standard errors are larger than the `polr` ones, as expected
+with clustered data:
+
+```{r se-ratio}
+se_polr <- sqrt(diag(vcov(m3)))[names(coef(m3))]
+summary(se[names(coef(m3))] / se_polr)
+```
+
+## Odds ratios
+
+The table shows the odds ratios with 95% confidence intervals and p-values
+from the design-based standard errors. An odds ratio above 1 means higher
+odds of a higher life satisfaction score.
+
+```{r coefs}
+coefs <- data.frame(term  = names(b),
+                    coef  = b,
+                    se    = se,
+                    OR    = exp(b),
+                    OR_lo = exp(b - 1.96 * se),
+                    OR_hi = exp(b + 1.96 * se),
+                    p     = 2 * pnorm(-abs(b / se)),
+                    row.names = NULL) %>%
+  filter(term %in% names(coef(m3)))
+
+knitr::kable(coefs %>% select(term, OR, OR_lo, OR_hi, p),
+             digits = c(0, 2, 2, 2, 3), col.names = c("Term", "OR", "2.5%", "97.5%", "p"),
+             longtable = TRUE)
+```
+
+# Assumption checks {#sec-checks}
+
+## Proportional odds
+
+The ordered logit gives each predictor one effect at every cut-off. To check
+this, we fit separate binary logits for $P(\text{stflife} \ge k)$ at four
+cut-offs with the same predictors and compare their coefficients. If the
+assumption holds, they are close to each other. The spread is the largest
+minus the smallest coefficient across the cut-offs (log-odds scale).
+`quasibinomial` gives the same estimates as `binomial` without warnings for
+non-integer weights.
+
+```{r po}
+cutoffs <- c(5, 7, 8, 9)
+f_rhs   <- delete.response(terms(m3))
+
+po <- sapply(cutoffs, function(k) {
+  dk <- d %>% mutate(y = as.integer(as.numeric(as.character(stflife)) >= k))
+  coef(glm(update(f_rhs, y ~ .), data = dk, weights = w,
+           family = quasibinomial))[-1]
+})
+colnames(po) <- paste0(">=", cutoffs)
+
+po_tab <- data.frame(M3 = coef(m3), po, check.names = FALSE)
+po_tab$spread <- apply(po, 1, function(x) max(x) - min(x))
+knitr::kable(po_tab[order(-po_tab$spread), ], digits = 2, longtable = TRUE)
+```
+
+The assumption holds well for the main determinants: income (`hincfel`),
+health, the trust scales, `rlgdgr`, `stfeco`, `stfhlth`, partner and gender all
+have spreads of `r round(max(po_tab[c("hincfel", "health", "trstprl", "ppltrst", "rlgdgr", "stfeco", "stfhlth", "partner", "female"), "spread"]), 2)` or less.
+It is violated for `sclmeet` (meeting friends matters more for moving out of
+the lowest scores than for reaching the top ones), and for country, age and
+`activity_grp`. Some small groups (`hhmmb` 6+, `eisced` level 1) also have
+large spreads, which partly reflects their noisy estimates. We keep one effect
+per variable and read the odds ratios of these variables as average effects
+across the scale.
+
+As a robustness check, we refit the model as a partial proportional odds model
+with `ordinal::clm`. The variables that break the assumption get a separate
+effect at each cut-off (`nominal`), and all other variables keep one effect.
+If the single effects barely change, the violation does not bias them.
+Freeing several of these variables at once gives crossing cut-points (an
+invalid fit), so each of the four variables is freed in its own fit.
+
+```{r ppo}
+f_po <- formula(m3)
+c_po <- clm(f_po, data = d, weights = w)  # same model as m3
+
+ppo_fit <- function(vars) {
+  f <- update(f_po, as.formula(paste(". ~ . -", paste(vars, collapse = " - "))))
+  clm(f, nominal = as.formula(paste("~", paste(vars, collapse = " + "))),
+      data = d, weights = w)
+}
+po_vars <- c("cntry", "age5", "activity_grp", "sclmeet")
+ppo <- lapply(setNames(po_vars, po_vars), ppo_fit)
+
+# code 0 = valid fit with increasing cut-points
+sapply(ppo, function(m) m$convergence$code)
+
+# odds ratios of the variables that keep one effect in every fit,
+# and their change in % compared with M3
+shared <- Reduce(intersect, lapply(ppo, function(m) names(m$beta)))
+ors <- sapply(c(list(M3 = c_po), ppo), function(m) exp(m$beta[shared]))
+chg <- 100 * (ors[, -1] / ors[, "M3"] - 1)
+knitr::kable(chg, digits = 1, longtable = TRUE,
+             caption = "Change in odds ratio (%) when one variable is freed")
+```
+
+All four partial fits are valid. The odds ratios of the variables that keep one
+effect change by at most `r round(max(abs(chg)), 1)`% (`eisced` level 1 when `sclmeet` is freed), and by
+`r round(max(abs(chg[c("hincfel", "health", "trstprl", "ppltrst", "partner"), ])), 1)`% or less for income, health, trust and partner. The violations
+therefore do not bias the other effects, and M3 keeps proportional odds.
+
+## Multicollinearity
+
+The variance inflation factor depends only on the predictors, so it is
+computed from a weighted linear model with the same right-hand side.
+$\text{GVIF}^{1/(2\,df)}$ makes factors comparable with one-coefficient terms.
+Values above about 2.2 (the square root of the usual cut-off 5) would be a
+concern.
+
+```{r vif}
+vif_tab <- car::vif(lm(update(f_rhs, as.numeric(stflife) ~ .), data = d, weights = w))
+knitr::kable(vif_tab[order(-vif_tab[, 3]), ], digits = 2)
+```
+
+The highest $\text{GVIF}^{1/(2\,df)}$ is `r round(max(vif_tab[, 3]), 2)` (`r rownames(vif_tab)[which.max(vif_tab[, 3])]`), well below 2.2, so
+multicollinearity is not a problem. `lv_r10` overlaps with country and round by
+construction, and `age5` and `activity_grp` overlap through retired people and
+students.
+
+# Test set
+
+The model predicts a probability for each score from 0 to 10. To compare it
+with the other group models, the prediction is the expected score
+$\hat y = \sum_{k=0}^{10} k \, \hat P(\text{stflife} = k)$.
+
+The metrics are weighted with `anweight`, with the same formula as `wmetrics`
+in `04_tree_mars.R`. $R^2$ is the share of the weighted variance of
+`stflife` in the test set explained by the predictions. The model was fitted
+on the train set only, and nothing was tuned on the test set.
+
+```{r test}
+probs       <- predict(m3, newdata = test_d, type = "probs")
+pred_ologit <- drop(probs %*% 0:10)
+y_test      <- as.numeric(as.character(test_d$stflife))
+
+wmetrics <- function(obs, pred, w) {
+  c(RMSE     = sqrt(sum(w * (obs - pred)^2) / sum(w)),
+    MAE      = sum(w * abs(obs - pred)) / sum(w),
+    Rsquared = 1 - sum(w * (obs - pred)^2) /
+                   sum(w * (obs - weighted.mean(obs, w))^2))
+}
+round(wmetrics(y_test, pred_ologit, test_d$anweight), 4)
+```
+
+`06a_ordered_logit_full_model.R` saves the same results for the group comparison:
+
+* `outputs/tables/ologit_metrics.csv`: the test metrics above.
+* `outputs/tables/ologit_coefficients.csv`: coefficients and cut-points with
+  design-based standard errors, p-values and odds ratios.
+* `outputs/predictions/ologit_test.csv`: `pred_ologit` for all 2,537 test rows,
+  with `idno`, `cntry` and `essround` to join the other models' predictions.
+* `data/ologit_model.rds`: the fitted model (not uploaded).
+
+# Notes for interpretation
+
+M3 includes `stfeco` (satisfaction with the economy) and `stfhlth`
+(satisfaction with the health services). Both are themselves satisfaction
+ratings and partly reflect the same general mood as `stflife`. They improve
+the fit and the test predictions, but they also absorb part of the effects of
+other predictors. For example, the effect of trust in parliament is much
+smaller in M3 than in the same model without these two variables (M3b), and
+the effects of income and health shrink. M3 is the model for prediction and
+for the group comparison. To explain what determines life satisfaction, M3b
+is the better model. M3b and the other analyses are in
+`scripts/06b_ordered_logit_analysis.R`.
+
+The results are associations, not causal effects, and each effect holds the
+other predictors constant.
