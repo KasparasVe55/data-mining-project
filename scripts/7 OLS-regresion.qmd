@@ -1,0 +1,233 @@
+---
+title: "OLS Regression"
+format: pdf
+editor: visual
+---
+
+```{r}
+
+library(dplyr)
+library(car)    # vif(), Anova()
+library(broom)  # tidy()
+
+# ---- settings -------------------------------------------------------------
+use_weights <- TRUE    # weight the fit by anweight, like the lasso and tree
+
+outcome <- "stflife"
+predictors <- c("agea", "female", "hincfel", "activity_grp", "health", "sclmeet",
+                "partner", "trstprl", "rlgdgr", "eisced", "domicil", "russian_home",
+                "inprdsc", "sclact", "hhmmb", "ppltrst", "stfeco", "stfhlth",
+                "aesfdrk", "ever_unemployed", "cntry", "round")
+
+# variables treated as categories (each gets dummy variables)
+cat_vars <- c("cntry", "round", "activity_grp", "domicil")
+
+fig_dir  <- "outputs/figures/models"
+tab_dir  <- "outputs/tables"
+pred_dir <- "outputs/predictions"
+dir.create(fig_dir,  showWarnings = FALSE, recursive = TRUE)
+dir.create(tab_dir,  showWarnings = FALSE, recursive = TRUE)
+dir.create(pred_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---- 1. load data ---------------------------------------------------------
+train <- readRDS("ess_baltic_R9-R11_train.rds")
+test  <- readRDS("ess_baltic_R9-R11_test.rds")
+
+# categorical variables become factors; the test set uses the train levels
+for (v in union(intersect(cat_vars, predictors),
+                predictors[sapply(train[predictors], is.character)])) {
+  train[[v]] <- factor(train[[v]])
+  test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
+}
+
+# fold and imputed columns are NOT used in the model
+fml <- reformulate(predictors, response = outcome)
+w   <- if (use_weights) train$anweight else NULL
+
+# ---- 2. fit OLS on the training set --------------------------------------
+fit <- lm(fml, data = train, weights = w)
+
+summary(fit)
+confint(fit)
+
+# one test per variable (the summary only compares each dummy with its reference)
+Anova(fit, type = 2)
+
+# standardized coefficient = coefficient x (weighted) sd of its column,
+# so variables on different scales can be compared (same idea as in the lasso script)
+X   <- model.matrix(fit)[, -1]
+wn  <- train$anweight / sum(train$anweight)
+wsd <- apply(X, 2, function(x) sqrt(sum(wn * (x - sum(wn * x))^2)))
+
+coef_table <- tidy(fit, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(std_estimate = estimate * wsd[term]) %>%
+  arrange(desc(abs(std_estimate)))
+print(coef_table, n = Inf)
+
+# ---- 3. checks ------------------------------------------------------------
+# GVIF^(1/(2*Df)) is comparable across variables, values above ~2 deserve a look
+print(vif(fit))
+
+# ---- 4. plots -------------------------------------------------------------
+# The old plots looked squashed because plot(fit) put four panels into a small
+# figure. These are drawn on a bigger canvas, with small see-through points.
+# In an Rmd/Quarto document add to the chunk header: fig.width=10, fig.height=8
+
+dot <- rgb(0, 0, 0, 0.25)
+
+diag_plots <- function(fit) {
+  fv  <- fitted(fit)
+  res <- residuals(fit)
+  rs  <- rstandard(fit)
+  par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
+
+  plot(fv, res, pch = 16, cex = 0.4, col = dot,
+       xlab = "Fitted", ylab = "Residual", main = "Residuals vs fitted")
+  abline(h = 0, col = "red", lty = 2)
+  lines(lowess(fv, res), col = "blue", lwd = 2)
+
+  qqnorm(rs, pch = 16, cex = 0.4, col = dot, main = "Normal QQ plot")
+  qqline(rs, col = "red", lty = 2)
+
+  plot(fv, sqrt(abs(rs)), pch = 16, cex = 0.4, col = dot,
+       xlab = "Fitted", ylab = "sqrt(|standardized residual|)",
+       main = "Scale-location (spread of residuals)")
+  lines(lowess(fv, sqrt(abs(rs))), col = "blue", lwd = 2)
+
+  plot(hatvalues(fit), rs, pch = 16, cex = 0.4, col = dot,
+       xlab = "Leverage", ylab = "Standardized residual",
+       main = "Residuals vs leverage")
+  abline(h = 0, col = "red", lty = 2)
+  par(mfrow = c(1, 1))
+}
+
+# saved as a big PDF and also shown on screen
+pdf(file.path(fig_dir, "ols_residuals.pdf"), width = 10, height = 8)
+diag_plots(fit)
+dev.off()
+diag_plots(fit)
+
+# standardized coefficients, longest bar = strongest tendency
+pdf(file.path(fig_dir, "ols_coef.pdf"), width = 7, height = 8)
+imp <- coef_table %>% arrange(abs(std_estimate))
+par(mar = c(5, 11, 4, 2))
+barplot(imp$std_estimate, names.arg = imp$term, horiz = TRUE, las = 1,
+        cex.names = 0.7,
+        col = ifelse(imp$std_estimate > 0, "steelblue", "tomato"),
+        xlab = "Standardized coefficient (change in life satisfaction for 1 sd)",
+        main = "OLS: coefficients")
+abline(v = 0)
+dev.off()
+
+# ---- 5. test set performance ---------------------------------------------
+# same weighted metrics as in the lasso script, so the two can be compared
+wmetrics <- function(obs, pred, w) {
+  c(RMSE     = sqrt(sum(w * (obs - pred)^2) / sum(w)),
+    MAE      = sum(w * abs(obs - pred)) / sum(w),
+    Rsquared = 1 - sum(w * (obs - pred)^2) /
+                   sum(w * (obs - weighted.mean(obs, w))^2))
+}
+
+pred_test <- predict(fit, newdata = test)
+range(pred_test)                                 # how far outside 0-10?
+pred_test <- pmin(pmax(pred_test, 0), 10)        # cut to the 0-10 scale, like the lasso script
+
+# one row, weighted with anweight, same layout as the other models
+metrics <- rbind(OLS = wmetrics(test[[outcome]], pred_test, test$anweight))
+metrics <- data.frame(Model = rownames(metrics), round(metrics, 4), row.names = NULL)
+print(metrics)
+
+# ---- CV on the shared folds (to compare with the lasso/tree CV results) ----
+# same folds as 03_train_test_split.R; not clipped, like cv.glmnet
+stopifnot("fold" %in% names(train))
+
+cv_pred <- rep(NA_real_, nrow(train))
+for (k in sort(unique(train$fold))) {
+  tr   <- train$fold != k
+  w_tr <- if (use_weights) train$anweight[tr] else NULL
+  m    <- lm(fml, data = train[tr, ], weights = w_tr)
+  cv_pred[!tr] <- predict(m, newdata = train[!tr, ])
+}
+stopifnot(!anyNA(cv_pred))
+
+cv_res <- data.frame(Model   = "OLS",
+                     RMSE_cv = wmetrics(train[[outcome]], cv_pred, train$anweight)[["RMSE"]])
+cv_res
+
+# observed vs predicted: one box of predictions for each observed answer 0-10
+pdf(file.path(fig_dir, "ols_obs_pred.pdf"), width = 7, height = 5)
+boxplot(pred_test ~ test[[outcome]], at = sort(unique(test[[outcome]])),
+        xlim = c(-0.5, 10.5), ylim = c(0, 10),
+        xlab = "Observed", ylab = "Predicted", main = "OLS: Obs vs Pred")
+abline(0, 1, col = "red", lty = 2)
+dev.off()
+
+# ---- 6. save --------------------------------------------------------------
+write.csv(coef_table, file.path(tab_dir, "ols_coefficients.csv"), row.names = FALSE)
+write.csv(metrics,    file.path(tab_dir, "ols_metrics.csv"),      row.names = FALSE)
+
+# test predictions with ids, so the group can join all models on the same rows
+stopifnot(all(c("idno", "cntry", "essround", "anweight", "imputed") %in% names(test)))
+stopifnot(!anyNA(pred_test))    # catches test levels that were not in train
+
+predictions <- data.frame(idno     = test$idno,
+                          cntry    = test$cntry,
+                          essround = test$essround,
+                          stflife  = test[[outcome]],
+                          anweight = test$anweight,
+                          imputed  = test$imputed,
+                          pred_ols = pred_test)
+write.csv(predictions, file.path(pred_dir, "ols_test.csv"), row.names = FALSE)
+
+# ---- 7. backward selection (optional) ------------------------------------
+# removes predictors one by one while AIC improves.
+# p-values after selection are too optimistic, so use them with care.
+# fit_small <- step(fit, direction = "backward")
+# summary(fit_small)
+
+# 1. raw average per country (weighted)
+train %>% group_by(cntry) %>%
+  summarise(n = n(), mean_swb = weighted.mean(stflife, anweight))
+
+# 2. do effects differ by country? (compare with the original model)
+fit_int <- update(fit, . ~ . + cntry:stfeco + cntry:hincfel + cntry:health)
+anova(fit, fit_int)     # small p = the effects differ between countries
+
+# 3. separate model per country (country itself is left out)
+fml_nc <- reformulate(setdiff(predictors, "cntry"), response = outcome)
+fits <- lapply(split(train, train$cntry), function(d) lm(fml_nc, data = d))
+lapply(fits, function(m) round(coef(summary(m))[, c(1, 4)], 3))
+```
+
+## Fit
+
+The model explains about 36% of the weighted variance in the train set (R\^2 = 0.358, adjusted R\^2 = 0.356). The rest is differences between people that the predictors do not capture.
+
+## Results
+
+Each coefficient is the change in life satisfaction (in points) for one unit more of the predictor, holding the others constant. The most important:
+
+- **Satisfaction with the economy** (`stfeco`) is by far the strongest predictor: +0.25 points per step.
+
+- **Income feeling** (`hincfel`, −0.61) and **health** (`health`, −0.45): a harder income situation and worse health lower life satisfaction.
+
+- **Having a partner** (+0.33), **being female** (+0.27) and **meeting friends** (`sclmeet`, +0.10 per step) raise it, and **being unemployed** lowers it by about 0.63 compared with working.
+
+- Age, education and household size have no clear effect.
+
+## Country and round
+
+Compared with Lithuania, Latvia is 0.31 points higher and Estonia 0.14 points higher after adjusting for the other predictors. Latvia has the lowest raw average, so its lower raw score is explained by the other predictors. Round 11 is about 0.31 points higher than round 9, and round 10 is not different from round 9.
+
+## Checks
+
+Multicollinearity is not a problem (highest GVIF is 1.73, for age). The residual plots show stripes and a funnel shape, which come from the whole-number, bounded 0--10 outcome. They make the p-values only approximate but do not hurt the predictions. The standard errors ignore the survey clustering, so borderline p-values should be read with care.
+
+## Country differences
+
+Interactions between country and the main predictors are significant (p = 0.023) but improve the fit by only 0.14%, so they are not worth adding. The main difference is that unemployment costs more in Latvia (−1.05) than in Lithuania (−0.35).
+
+## Test set
+
+On the test set the weighted RMSE is 1.78, MAE 1.36 and R\^2 0.38. The CV RMSE (1.805) is close to the test RMSE, so there is no overfitting.
