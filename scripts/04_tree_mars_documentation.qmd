@@ -1,0 +1,282 @@
+---
+title: "Regression tree and MARS for life satisfaction"
+subtitle: "How the models are fitted and what they show"
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    geometry: margin=2.5cm
+execute:
+  warning: false
+  message: false
+---
+
+This document explains the regression tree and the MARS model for life
+satisfaction (`stflife`, 0--10) in Estonia, Latvia and Lithuania (ESS rounds
+9--11). The models are fitted in `scripts/04_tree_mars.R`, which also saves
+the figures, the test metrics and the test predictions used in the group
+comparison. Fitting MARS takes about 10 minutes, so this document does not fit
+the models again: the fitting code is shown, and the results are read from the
+saved models in `data/tree_mars_models.rds`. This document does not write any
+files.
+
+To render it, run `01_clean.R`, `03_train_test_split.R` and `04_tree_mars.R`
+first, then `quarto render scripts/04_tree_mars_documentation.qmd`.
+
+# Setup
+
+The code runs from the repository root, so the paths are the same as in the
+R scripts.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r packages}
+library(dplyr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(earth)
+```
+
+The train and test sets come from `03_train_test_split.R`. Missing predictor
+values are already filled there (median or most common category from the train
+set), and the `imputed` column marks the filled rows.
+
+```{r data}
+train <- readRDS("data/ess_train.rds")
+test  <- readRDS("data/ess_test.rds")
+models <- readRDS("data/tree_mars_models.rds")
+fit_tree <- models$tree
+fit_mars <- models$mars
+
+c(train = nrow(train), test = nrow(test))
+```
+
+# Predictors and cross-validation
+
+Both models use the same 22 predictors as the other group models, as defined in
+`03_train_test_split.R`. Age is used as a number (`agea`), not in groups, so
+the models can find where the effect of age changes.
+
+```{r predictors}
+predictors <- c("agea", "female", "hincfel", "activity_grp", "health", "sclmeet",
+                "partner", "trstprl", "rlgdgr", "eisced", "domicil", "russian_home",
+                "inprdsc", "sclact", "hhmmb", "ppltrst", "stfeco", "stfhlth",
+                "aesfdrk", "ever_unemployed", "cntry", "round")
+f <- reformulate(predictors, response = "stflife")
+```
+
+The tuning parameters are chosen with 10-fold cross-validation. The folds come
+from the `fold` column made in `03_train_test_split.R`, so all group models are
+tuned on the same folds. For each fold, the model is fitted on the other nine
+folds and tested on the one left out.
+
+```{r folds, eval = FALSE}
+folds <- sort(unique(train$fold))
+index <- lapply(folds, function(k) which(train$fold != k))
+names(index) <- paste0("Fold", folds)
+ctrl <- trainControl(method = "cv", index = index)
+```
+
+# Regression tree
+
+## Method
+
+A regression tree splits people into groups with yes/no questions, one
+variable at a time (for example, "is satisfaction with the economy below
+4.5?"). The prediction for a person is the average life satisfaction of their
+final group (terminal node). The complexity parameter `cp` controls how much
+the tree is pruned: a large `cp` gives a small tree that may miss patterns, a
+small `cp` gives a large tree that follows noise in the training data. The tree
+is fitted with the survey weights (`anweight`).
+
+```{r tree-fit, eval = FALSE}
+fit_tree <- train(f, data = train,
+                  method = "rpart",
+                  weights = train$anweight,
+                  tuneLength = 20,
+                  trControl = ctrl)
+```
+
+## Results
+
+```{r tree-cv}
+fit_tree$bestTune
+fit_tree$results[rownames(fit_tree$bestTune), c("cp", "RMSE", "Rsquared", "MAE")]
+```
+
+```{r tree-cv-plot, fig.height = 4}
+plot(fit_tree)
+```
+
+```{r tree-plot, fig.height = 6, fig.width = 9}
+rpart.plot(fit_tree$finalModel)
+```
+
+```{r tree-varimp, fig.height = 4.5}
+plot(varImp(fit_tree), top = 15)
+```
+
+The regression tree was tuned with 10-fold cross-validation over the complexity
+parameter (selected cp = 0.0033), which gave a tree with 14 terminal nodes. On
+the test set it reached a weighted RMSE of 1.87 and R² of 0.31. The tree uses
+only three variables: satisfaction with the economy, feeling about household
+income and self-rated health. The first split separates people who rate the
+economy below 5, and the least satisfied group (predicted 2.9) combines very
+low satisfaction with the economy with great difficulty living on the current
+income, while the most satisfied group (predicted 8.5) rates the economy at 8
+or higher and lives comfortably or copes on its income. Country and age were
+not used in any split. A slightly larger tree (cp = 0.002, 22 terminal nodes)
+had almost the same cross-validation error and also used age, main activity and
+trust, but larger trees predicted worse. The strong role of satisfaction with
+the economy should be interpreted with caution, as it may partly reflect a
+general tendency to answer positively.
+
+# MARS
+
+## Method
+
+MARS (Multivariate Adaptive Regression Splines) is a linear regression whose
+lines may bend. It builds the model from hinge functions such as
+`h(agea - 68) = max(0, agea - 68)`, which is 0 up to age 68 and then grows by
+one per year. The bend points (knots) are found from the data. The model is
+built in two steps: a forward pass adds the hinge terms that reduce the error
+most, and a backward pass removes the least useful ones.
+
+Two tuning parameters are chosen by cross-validation:
+
+- `degree`: 1 means no interactions, 2 means two variables may be multiplied.
+- `nprune`: the largest number of terms kept after the backward pass (2--30).
+
+Interactions are allowed only between country or ESS round and another
+predictor (for example, health × Latvia). This checks whether the same factors
+matter in the same way in each country and round. Products of two other
+variables (for example, health × income) and country × round are not allowed.
+
+MARS is fitted without survey weights. With weights, one fit took more than 9
+minutes, so the tuning would take several hours, while without weights one fit
+takes a few seconds. Country and round are predictors, and the test results are
+still weighted.
+
+```{r mars-fit, eval = FALSE}
+allowed_cr <- function(degree, pred, parents, namesx, first) {
+  if (degree < 2) return(TRUE)
+  is_cr <- grepl("^cntry|^round", namesx)
+  xor(is_cr[pred], any(is_cr[parents != 0]))
+}
+
+fit_mars <- train(f, data = train,
+                  method = "earth",
+                  tuneGrid = expand.grid(degree = 1:2, nprune = 2:30),
+                  allowed = allowed_cr,
+                  trControl = ctrl)
+```
+
+## Results
+
+```{r mars-cv}
+fit_mars$bestTune
+fit_mars$results[rownames(fit_mars$bestTune), c("degree", "nprune", "RMSE", "Rsquared", "MAE")]
+
+# best result with and without interactions
+r <- fit_mars$results
+do.call(rbind, lapply(split(r, r$degree), function(x) x[which.min(x$RMSE), c("degree", "nprune", "RMSE", "Rsquared")]))
+```
+
+```{r mars-cv-plot, fig.height = 4}
+plot(fit_mars)
+```
+
+The coefficients of the selected model. `h()` terms are the hinge functions,
+and the number inside is the knot.
+
+```{r mars-summary}
+summary(fit_mars$finalModel)
+```
+
+```{r mars-varimp, fig.height = 4.5}
+plot(varImp(fit_mars), top = 15)
+```
+
+The plots below show the effect of each variable, with all other variables
+held at typical values.
+
+```{r mars-effects, fig.height = 8, fig.width = 9}
+plotmo(fit_mars$finalModel, caption = "")
+```
+
+MARS was tuned with 10-fold cross-validation over the number of terms (2--30)
+and the degree of interaction (1 or 2), where interactions were allowed only
+between country or ESS round and another predictor. Because fitting with survey
+weights was computationally too slow, MARS was fitted without weights, while
+the test results are weighted. The selected model has 21 terms using 16
+predictors and two interactions. On the test set it reached a weighted RMSE of
+1.78, MAE of 1.35 and R² of 0.38. The most important variables were
+satisfaction with the economy, feeling about household income and self-rated
+health. Each point of satisfaction with the economy below 5 lowers predicted
+life satisfaction by 0.32, and each step from coping to finding it difficult or
+very difficult to live on the current income lowers it by 0.67, as does each
+step from fair to bad or very bad health (0.70). Living with a partner (+0.33)
+and being female (+0.26) are associated with higher, and unemployment (−0.54)
+with lower life satisfaction. Age has no effect until 68, after which predicted
+satisfaction rises by 0.03 points per year. Once these factors are held
+constant, Latvia is 0.32 points more satisfied than Lithuania. The two selected
+interactions are small: in round 11, low satisfaction with the economy lowered
+life satisfaction less than in earlier rounds, and in Estonia, being less
+socially active than people of the same age mattered less. Allowing these
+interactions reduced the cross-validation error only negligibly (RMSE 1.774
+with and without them), which suggests that the main factors work similarly
+across the three countries and rounds. The model overestimates very low and
+underestimates very high satisfaction.
+
+## Residual checks
+
+MARS gives no p-values, so normal residuals are not needed. The residuals vs
+fitted plot shows diagonal stripes because life satisfaction is a whole number
+from 0 to 10; there is no strong pattern. The QQ plot shows large negative
+residuals: people with very low satisfaction are predicted too high.
+
+```{r mars-residuals, fig.height = 7, fig.width = 8}
+plot(fit_mars$finalModel, caption = "")
+```
+
+# Test set
+
+The test set is used only once, to compare the final models. All metrics are
+weighted with `anweight`. MARS lines can go above 10, so MARS predictions are
+cut to the 0--10 scale; the tree always stays inside it, because it predicts
+group means.
+
+```{r test}
+wmetrics <- function(obs, pred, w) {
+  c(RMSE     = sqrt(sum(w * (obs - pred)^2) / sum(w)),
+    MAE      = sum(w * abs(obs - pred)) / sum(w),
+    Rsquared = 1 - sum(w * (obs - pred)^2) /
+                   sum(w * (obs - weighted.mean(obs, w))^2))
+}
+
+pred_tree <- predict(fit_tree, newdata = test)
+pred_mars <- pmin(pmax(as.vector(predict(fit_mars, newdata = test)), 0), 10)
+
+round(rbind(Tree = wmetrics(test$stflife, pred_tree, test$anweight),
+            MARS = wmetrics(test$stflife, pred_mars, test$anweight)), 4)
+```
+
+Each box shows the predictions for the people who gave that answer. The red
+line is a perfect prediction. Both models predict very low answers too high and
+very high answers too low, which is common when the outcome is skewed towards
+the upper end of the scale.
+
+```{r obs-pred, fig.height = 4.5, fig.width = 9}
+par(mfrow = c(1, 2))
+boxplot(pred_tree ~ test$stflife, at = sort(unique(test$stflife)),
+        xlim = c(-0.5, 10.5), ylim = c(0, 10),
+        xlab = "Observed", ylab = "Predicted", main = "Tree: Obs vs Pred")
+abline(0, 1, col = "red", lty = 2)
+boxplot(pred_mars ~ test$stflife, at = sort(unique(test$stflife)),
+        xlim = c(-0.5, 10.5), ylim = c(0, 10),
+        xlab = "Observed", ylab = "Predicted", main = "MARS: Obs vs Pred")
+abline(0, 1, col = "red", lty = 2)
+```

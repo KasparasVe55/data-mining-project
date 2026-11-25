@@ -15,3 +15,12 @@ Thumbs.db
 
 # Clean data made by scripts/01_clean.R (everyone creates it locally)
 data/*.rds
+
+# Rendered Quarto documents and their leftovers (everyone renders them locally)
+scripts/*.pdf
+scripts/*.html
+scripts/*.tex
+scripts/*_files/
+
+# plot file R makes when a plot is drawn outside pdf()
+Rplots.pdf

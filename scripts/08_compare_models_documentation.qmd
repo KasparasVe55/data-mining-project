@@ -1,0 +1,180 @@
+---
+title: "Comparison of the models for life satisfaction"
+subtitle: "Test set results and paired bootstrap"
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    geometry: margin=2.5cm
+execute:
+  warning: false
+  message: false
+---
+
+This document compares the five group models for life satisfaction
+(`stflife`, 0--10) on the same test set: ordinal logit, OLS, Lasso, MARS and the
+regression tree. The code is the same as in `scripts/08_compare_models.R`,
+which saves the comparison tables and figure. This document does not write any
+files.
+
+To render it, run `01_clean.R` and `03_train_test_split.R` first, make sure the
+prediction files of all models are in `outputs/predictions`, then
+`quarto render scripts/08_compare_models_documentation.qmd`.
+
+# Setup
+
+The code runs from the repository root, so the paths are the same as in the
+R scripts.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r packages}
+library(dplyr)
+library(knitr)
+```
+
+# Joining the predictions
+
+Each model script saves its test predictions in `outputs/predictions`, with the
+columns `idno`, `cntry`, `essround` and `pred_<model>`. The id is all three
+columns together, because `idno` repeats between countries and rounds. The
+simpler Lasso (one-standard-error rule, `pred_lasso_1se`) is only a check in
+`05_lasso.R`, so it is not compared here.
+
+```{r join}
+key  <- c("idno", "cntry", "essround")
+test <- readRDS("data/ess_test.rds")[, c(key, "stflife", "anweight")]
+test$cntry <- as.character(test$cntry)
+
+for (file in list.files("outputs/predictions", pattern = "_test\\.csv$", full.names = TRUE)) {
+  p <- read.csv(file)
+  test <- merge(test, p[, c(key, grep("^pred_", names(p), value = TRUE))], by = key)
+}
+
+pred_cols <- grep("^pred_", names(test), value = TRUE)
+pred_cols <- setdiff(pred_cols, "pred_lasso_1se")
+
+# every model must predict all test rows, otherwise the comparison is not fair
+stopifnot(nrow(test) == 2537, !anyNA(test[pred_cols]))
+pred_cols
+```
+
+# Test set metrics
+
+RMSE, MAE and R² are weighted with the survey weights (`anweight`), the same as
+in the model scripts. R² is 1 − SSE / SST, where both sums are weighted.
+
+```{r metrics}
+metrics <- function(y, p, w) {
+  c(RMSE     = sqrt(sum(w * (y - p)^2) / sum(w)),
+    MAE      = sum(w * abs(y - p)) / sum(w),
+    Rsquared = 1 - sum(w * (y - p)^2) / sum(w * (y - weighted.mean(y, w))^2))
+}
+
+score <- function(i) {
+  sapply(pred_cols, function(m) metrics(test$stflife[i], test[[m]][i], test$anweight[i]))
+}
+
+estimates <- score(seq_len(nrow(test)))
+
+performance <- data.frame(Model = sub("^pred_", "", pred_cols),
+                          round(t(estimates), 3), row.names = NULL)
+performance <- performance[order(performance$RMSE), ]
+kable(performance, row.names = FALSE)
+```
+
+# Are the differences real?
+
+The test set is one random sample, so small differences between models can be
+chance. A paired bootstrap checks this: the test respondents are drawn again
+with replacement 9,999 times, the same drawn respondents are used for all
+models, and the metrics are computed again each time. For each pair of models,
+the 95% interval of the difference shows how large the difference could be;
+if the interval contains 0, the models may not really differ. Many pairs are
+tested at once, so the p-values are adjusted with the Holm method.
+
+```{r bootstrap}
+B <- 9999
+set.seed(2026)
+n <- nrow(test)
+
+boot_scores <- array(NA_real_, dim = c(3, length(pred_cols), B),
+                     dimnames = list(rownames(estimates), pred_cols, NULL))
+for (b in seq_len(B)) {
+  i <- sample.int(n, size = n, replace = TRUE)
+  boot_scores[, , b] <- score(i)
+}
+
+pairs  <- combn(seq_along(pred_cols), 2)
+output <- list()
+
+for (j in seq_len(ncol(pairs))) {
+  a <- pairs[1, j]
+  b <- pairs[2, j]
+  for (k in rownames(estimates)) {
+    difference      <- estimates[k, a] - estimates[k, b]
+    boot_difference <- boot_scores[k, a, ] - boot_scores[k, b, ]
+    ci <- quantile(boot_difference, probs = c(0.025, 0.975), names = FALSE)
+    null_difference <- boot_difference - difference
+    p_value <- (1 + sum(abs(null_difference) >= abs(difference))) / (B + 1)
+
+    output[[length(output) + 1]] <- data.frame(
+      Model_A = sub("^pred_", "", pred_cols[a]),
+      Model_B = sub("^pred_", "", pred_cols[b]),
+      Metric = k, Difference = difference,
+      CI_lower = ci[1], CI_upper = ci[2], p_value = p_value)
+  }
+}
+
+pairwise <- do.call(rbind, output)
+pairwise$p_Holm <- ave(pairwise$p_value, pairwise$Metric,
+                       FUN = function(p) p.adjust(p, method = "holm"))
+pairwise$Significant <- pairwise$p_Holm < 0.05
+```
+
+Differences in RMSE are Model A minus Model B, so a negative difference means
+that Model A has the smaller error.
+
+```{r pairwise-rmse}
+rmse_pairs <- subset(pairwise, Metric == "RMSE",
+                     select = c(Model_A, Model_B, Difference, CI_lower, CI_upper, p_Holm, Significant))
+rmse_pairs[, 3:6] <- round(rmse_pairs[, 3:6], 4)
+kable(rmse_pairs, row.names = FALSE)
+```
+
+The figure shows the test RMSE of each model with its 95% bootstrap interval.
+The intervals overlap a lot, because each one also includes the chance of the
+test sample, which is the same for all models. The paired differences in the
+table above remove this shared part, so they are used for the conclusions.
+
+```{r figure, fig.height = 4, fig.width = 7}
+rmse_ci <- t(apply(boot_scores["RMSE", , ], 1, quantile, probs = c(0.025, 0.975)))
+ord     <- order(estimates["RMSE", ], decreasing = TRUE)
+
+par(mar = c(5, 8, 2, 1))
+plot(estimates["RMSE", ord], seq_along(ord), xlim = range(rmse_ci), pch = 16,
+     yaxt = "n", xlab = "Test RMSE (weighted), 95% bootstrap interval", ylab = "",
+     main = "Model comparison on the test set")
+segments(rmse_ci[ord, 1], seq_along(ord), rmse_ci[ord, 2], seq_along(ord))
+axis(2, at = seq_along(ord), labels = sub("^pred_", "", pred_cols[ord]), las = 1)
+```
+
+# Summary
+
+All models were compared on the same test set of 2,537 respondents, using RMSE,
+MAE and R² weighted with the survey weights. To test whether the differences
+between models are larger than chance, we used a paired bootstrap: the test set
+was resampled 9,999 times, the same resampled respondents were used for all
+models, and the 95% interval of each pairwise difference was calculated;
+p-values were adjusted for multiple comparisons with the Holm method. The
+ordinal logit model had the lowest error (RMSE 1.770, R² = 0.387), followed
+closely by OLS (1.782), Lasso (1.782) and MARS (1.784), while the regression
+tree was clearly weaker (1.874, R² = 0.314). The tree was significantly worse
+than every other model (adjusted p = 0.001), but the differences between the
+four best models were small (at most 0.013 in RMSE) and none was statistically
+significant (all adjusted p-values 0.33 or higher). The more flexible MARS and the penalized Lasso
+therefore did not predict better than linear regression, in line with Oparina
+et al. (2025), who found only moderate gains from machine learning in
+predicting life satisfaction.
