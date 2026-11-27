@@ -14,10 +14,27 @@ execute:
 This document explains how we fit the ordered logit model for life
 satisfaction (`stflife`, 0--10) in Estonia, Latvia and Lithuania (ESS rounds
 9--11). The full model (M3) uses all 22 predictors, like the other group
-models. The code is the same as in `scripts/06a_ordered_logit_full_model.R`,
-which saves the model outputs used in the group comparison. This document does not write
-any files. The wider analysis (smaller models, interactions, robustness checks,
-importance, predicted probabilities) is in `scripts/06b_ordered_logit_analysis.R`.
+models. M3 is our final ordered logit model. Here it is fitted on the train
+set and evaluated on the test set, the same as in
+`scripts/06a_ordered_logit_full_model.R`, which saves the outputs used in the
+group comparison. This document does not write any files.
+
+The ordered logit files:
+
+* `06a_ordered_logit_full_model.R`: M3 on the train set, test metrics and
+  predictions for the group comparison (this document).
+* `06b_ordered_logit_analysis.R`: how M3 was built (smaller models M0--M2),
+  and the final M3 fitted on all data (train + test) with the odds ratios for
+  the report, the country and age gaps and the interaction tests.
+* `06c_ordered_logit_checks.R`: assumption and robustness checks of the final
+  M3, explained with conclusions in `06c_ordered_logit_checks_documentation.qmd`.
+
+**Which odds ratios to report.** The odds ratios in this document come from
+the train set (80% of the data). The report uses the same model fitted on all
+data, saved in `outputs/tables/ologit_final_coefficients.csv` by `06b`. The
+two fits give very similar odds ratios (all all-data estimates lie inside the
+train confidence intervals, see the checks document). The test metrics come
+from the train fit, because the all-data fit has seen the test rows.
 
 To render it, run `01_clean.R` and `03_train_test_split.R` first, then
 `quarto render scripts/06_ordered_logit_documentation.qmd`.
@@ -225,7 +242,8 @@ summary(se[names(coef(m3))] / se_polr)
 
 The table shows the odds ratios with 95% confidence intervals and p-values
 from the design-based standard errors. An odds ratio above 1 means higher
-odds of a higher life satisfaction score.
+odds of a higher life satisfaction score. These are the train-set odds ratios,
+the report uses the all-data fit (`ologit_final_coefficients.csv`).
 
 ```{r coefs}
 coefs <- data.frame(term  = names(b),
@@ -335,6 +353,10 @@ multicollinearity is not a problem. `lv_r10` overlaps with country and round by
 construction, and `age5` and `activity_grp` overlap through retired people and
 students.
 
+The same checks on the final all-data fit, together with a linearity check of
+the numeric predictors and robustness checks, are in
+`06c_ordered_logit_checks_documentation.qmd`.
+
 # Test set
 
 The model predicts a probability for each score from 0 to 10. To compare it
@@ -371,16 +393,21 @@ round(wmetrics(y_test, pred_ologit, test_d$anweight), 4)
 
 # Notes for interpretation
 
-M3 includes `stfeco` (satisfaction with the economy) and `stfhlth`
-(satisfaction with the health services). Both are themselves satisfaction
-ratings and partly reflect the same general mood as `stflife`. They improve
-the fit and the test predictions, but they also absorb part of the effects of
-other predictors. For example, the effect of trust in parliament is much
-smaller in M3 than in the same model without these two variables (M3b), and
-the effects of income and health shrink. M3 is the model for prediction and
-for the group comparison. To explain what determines life satisfaction, M3b
-is the better model. M3b and the other analyses are in
-`scripts/06b_ordered_logit_analysis.R`.
+M3 is the final model, both for the group comparison and for explaining what
+determines life satisfaction. Three points matter when reading its odds ratios.
 
-The results are associations, not causal effects, and each effect holds the
-other predictors constant.
+* **Satisfaction ratings as predictors.** M3 includes `stfeco` (satisfaction
+  with the economy) and `stfhlth` (satisfaction with the health services). Both
+  are satisfaction ratings and partly reflect the same general mood as
+  `stflife`. They improve the fit, but they also absorb part of the effects of
+  other predictors. Trust in parliament has a much smaller effect in M3 than
+  without these two variables, and the effects of income and health shrink
+  somewhat. Country effects are the gaps that remain among people who rate the
+  economy equally.
+* **Average effects.** Some variables (country, age, activity, meeting people)
+  break proportional odds, and the 0--10 attitude scales are not linear (nearly
+  flat, then a jump at the top of the scale). Their odds ratios are average
+  effects. The checks document shows that this does not change the other
+  effects.
+* **Associations.** The results are associations, not causal effects, and each
+  effect holds the other predictors constant.
