@@ -1,0 +1,304 @@
+---
+title: "Ordered logit model for life satisfaction"
+subtitle: "Assumption and robustness checks of the final model (M3)"
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    geometry: margin=2.5cm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+This document explains the checks of our final ordered logit model and what
+we conclude from each of them. The checks are run by
+`scripts/06c_ordered_logit_checks.R`, and this document only reads the tables
+that script saves in `outputs/tables/ologit_check_*.csv`. How the model is
+built and fitted is explained in `06_ordered_logit_documentation.qmd`.
+
+To render it, run `01_clean.R`, `03_train_test_split.R`,
+`06a_ordered_logit_full_model.R` and `06c_ordered_logit_checks.R` first, then:
+
+```bash
+quarto render scripts/06c_ordered_logit_checks_documentation.qmd
+```
+
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r data}
+library(dplyr)
+rd  <- function(f) read.csv(file.path("outputs/tables", f))
+po    <- rd("ologit_check_po.csv")
+ppo   <- rd("ologit_check_ppo.csv")
+lin   <- rd("ologit_check_linearity.csv")
+lin_o <- rd("ologit_check_linearity_other.csv")
+gvif  <- rd("ologit_check_gvif.csv")
+rob   <- rd("ologit_check_robustness.csv")
+
+# the main determinants, used to summarise how much they change
+key_terms <- c("hincfel", "health", "stfeco", "partner", "female",
+               "activity_grpUnemployed", "cntryLV")
+r1 <- function(x) format(round(x, 1), nsmall = 1)
+```
+
+# What is checked
+
+The model is M3: an ordered logit for `stflife` (0--10) with all 22 group
+predictors plus the Latvia round 10 indicator `lv_r10`, weighted with
+`anweight`, with design-based standard errors. It is fitted on **all data**
+(train + test, 12,688 respondents), the fit whose odds ratios go into the
+report. Every check below is run on this fit.
+
+There are two kinds of checks.
+
+* **Assumption checks** ask whether an ordered logit fits these data: does
+  each predictor have the same effect at every point of the scale
+  (proportional odds), do numeric predictors have equal steps (linearity), and
+  are the predictors too strongly related to each other (multicollinearity)?
+  The fourth usual assumption, independent observations, does not hold in a
+  clustered survey, which is why all standard errors are design-based.
+* **Robustness checks** ask whether the results depend on choices we made:
+  the 80/20 split, filling in missing values, and the Latvia round 10 survey.
+
+The checks cannot prove that the model is right. They show whether its
+assumptions hold well enough and whether the conclusions change.
+
+## Summary
+
+```{r summary}
+po_var <- po %>% group_by(variable) %>% summarise(spread = max(spread)) %>%
+  arrange(desc(spread))
+ppo_vars <- po_var$variable[po_var$spread > 0.5]
+lin_t <- lin %>% group_by(variable) %>%
+  summarise(dAIC = first(dAIC), p = first(p), max_gap = max(abs(gap)),
+            slope_total = abs(last(linear_effect))) %>% arrange(desc(dAIC))
+nonlin <- lin_t$variable[lin_t$dAIC > 10]
+rob_c <- filter(rob, type == "coefficient")
+rob_k <- filter(rob_c, term %in% key_terms)
+
+summ <- data.frame(
+  Check = c("Proportional odds", "Linearity", "Multicollinearity",
+            "Robustness (3 refits)"),
+  Result = c(
+    paste0("Violated for ", length(ppo_vars), " variables. Freeing them changes the other odds ratios by at most ",
+           r1(max(abs(ppo$OR_change_pct))), "%."),
+    paste0("Not linear for ", length(nonlin), " attitude scales. Coding them as categories changes the main determinants by at most ",
+           r1(max(abs(lin_o$OR_change_pct[lin_o$term %in% key_terms]))), "%."),
+    paste0("Highest GVIF^(1/(2 df)) ", round(max(gvif$GVIF_adj), 2), ", well below 2.2."),
+    paste0(sum(rob_c$alt_in_ref_ci), " of ", nrow(rob_c),
+           " refitted estimates lie inside the 95% CI of the final model. Main determinants change by at most ",
+           r1(max(abs(rob_k$OR_change_pct))), "%.")),
+  Conclusion = c("Report average effects", "Limitation, keep numeric",
+                 "No problem", "Results are robust"))
+knitr::kable(summ)
+```
+
+**Overall conclusion.** The model's assumptions hold well enough for its main
+conclusions. Two assumptions are broken (proportional odds for some variables
+and linearity for the attitude scales), but neither changes the effects of
+income, health and the other main determinants. The results also do not
+depend on the train/test split, on filling in missing values or on the
+Latvia round 10 survey.
+
+# Assumption checks
+
+## Proportional odds
+
+**What it is.** The ordered logit gives each predictor one odds ratio for the
+whole 0--10 scale. It assumes, for example, that income raises the odds of
+scoring above 4 by the same factor as the odds of scoring above 8.
+
+**How we checked it.** We fitted separate yes/no (binary) logits for
+"score of at least $k$" at $k$ = 5, 7, 8 and 9, with the same predictors. If
+the assumption holds, the coefficients are similar across the four cut-offs.
+The spread is the largest minus the smallest of them, on the log-odds scale.
+With 12,688 respondents a formal test rejects the assumption for almost any
+variable, so we look at the size of the spread and, more importantly, at
+whether the violation changes the other results.
+
+```{r po}
+knitr::kable(po_var %>% mutate(spread = round(spread, 2)),
+             col.names = c("Variable", "Largest spread (log-odds)"))
+```
+
+**Result.** The assumption holds well for the main determinants (income,
+health, trust, the satisfaction ratings, partner and gender, spreads of
+`r round(max(po_var$spread[po_var$variable %in% c("hincfel", "health", "trstprl", "ppltrst", "stfeco", "stfhlth", "partner", "female")]), 2)`
+or less). It is violated (spread above 0.5) for
+`r paste(ppo_vars, collapse = ", ")`. For example, meeting people
+(`sclmeet`) matters more for moving out of the lowest scores than for reaching
+the highest ones.
+
+**Does it matter?** We refitted the model once for each of these variables,
+giving that variable a separate effect at every cut-off (a partial
+proportional odds model, `ordinal::clm`), and compared the odds ratios of all
+other variables with the final model. One variable at a time, because freeing
+several at once gives an invalid fit.
+
+```{r ppo}
+ppo %>% group_by(nominal) %>%
+  summarise(median = median(abs(OR_change_pct)), largest = max(abs(OR_change_pct)),
+            key = max(abs(OR_change_pct[term %in% key_terms]))) %>%
+  mutate(across(-nominal, ~ round(.x, 1))) %>%
+  knitr::kable(col.names = c("Variable freed", "Median change (%)",
+                             "Largest change (%)", "Main determinants, largest (%)"))
+```
+
+**Conclusion.** The other odds ratios change by a median of
+`r r1(median(abs(ppo$OR_change_pct)))`% and at most
+`r r1(max(abs(ppo$OR_change_pct)))`%. The violations do not bias the other
+effects, so the model keeps one effect per variable. For the variables that
+break the assumption, the odds ratio is an average effect over the scale.
+
+## Linearity of the numeric predictors
+
+**What it is.** A numeric predictor gets one odds ratio per unit, which
+assumes every step has the same effect (for example, from 2 to 3 the same as
+from 8 to 9 on trust in parliament).
+
+**How we checked it.** Each numeric predictor was entered as a category
+variable (one effect per value) instead of a number, one at a time. If the
+category version fits much better (AIC lower by more than 10), the steps are
+not equal. The largest gap compares the two versions at any value, against the
+whole linear effect from the lowest to the highest value.
+
+```{r lin}
+lin_t %>% mutate(dAIC = round(dAIC, 1), p = format(signif(p, 2), scientific = TRUE),
+                 max_gap = round(max_gap, 2), slope_total = round(slope_total, 2)) %>%
+  knitr::kable(col.names = c("Variable", "AIC gain as categories", "p (LR test)",
+                             "Largest gap (log-odds)", "Whole linear effect (log-odds)"))
+```
+
+**Result.** Income (`hincfel`) and health are close to linear. The factor
+version fits clearly better for `r paste(nonlin, collapse = ", ")`. The
+0--10 attitude scales all have the same shape: nearly flat over most of the
+scale and a jump at 8--10, largest at 10.
+
+```{r shape, fig.height = 3.2, fig.width = 7}
+sh <- filter(lin, variable %in% c("stfeco", "stfhlth", "trstprl"))
+op <- par(mfrow = c(1, 3), mar = c(4, 4, 2, 1))
+for (v in c("stfeco", "stfhlth", "trstprl")) {
+  x <- filter(sh, variable == v)
+  plot(x$level, x$factor_effect, type = "b", pch = 16, main = v,
+       xlab = "Value", ylab = "Effect vs 0 (log-odds)",
+       ylim = range(c(x$factor_effect, x$linear_effect)))
+  lines(x$level, x$linear_effect, lty = 2)
+}
+par(op)
+```
+
+*Solid: effect of each value as a category. Dashed: the linear effect in the
+model.*
+
+This pattern probably reflects a response style: people who answer 10 on
+other questions also tend to give high life satisfaction scores. It also
+explains why trust in parliament has almost no average effect in M3 (OR close
+to 1), while people with complete trust (10) are clearly more satisfied.
+
+**Does it matter?** We refitted the model with all of these scales as
+categories at once and compared the other odds ratios.
+
+```{r lin-other}
+lin_o %>% filter(term %in% key_terms) %>%
+  mutate(across(c(OR_M3, OR_factors), ~ round(.x, 3)),
+         OR_change_pct = round(OR_change_pct, 1)) %>%
+  select(term, OR_M3, OR_factors, OR_change_pct) %>%
+  knitr::kable(col.names = c("Term", "OR, final model", "OR, scales as categories", "Change (%)"))
+```
+
+**Conclusion.** The main determinants change by at most
+`r r1(max(abs(lin_o$OR_change_pct[lin_o$term %in% key_terms])))`% (all other
+terms: median `r r1(median(abs(lin_o$OR_change_pct)))`%). We keep the scales
+numeric, read their odds ratios as average trends and report the non-linearity
+as a limitation.
+
+## Multicollinearity
+
+**What it is.** If predictors are strongly related to each other, their
+separate effects are hard to estimate and their standard errors grow.
+
+**How we checked it.** Generalised variance inflation factors from a weighted
+linear model with the same predictors. $\text{GVIF}^{1/(2\,df)}$ makes
+category variables comparable with single terms. Values above about 2.2 (the
+square root of the usual cut-off 5) would be a concern.
+
+```{r gvif}
+knitr::kable(head(gvif, 6) %>% mutate(across(c(GVIF, GVIF_adj), ~ round(.x, 2))),
+             col.names = c("Variable", "GVIF", "df", "GVIF^(1/(2 df))"))
+```
+
+**Conclusion.** The highest value is `r round(max(gvif$GVIF_adj), 2)`
+(`r gvif$variable[1]`), well below 2.2. Multicollinearity is not a problem.
+Satisfaction with the economy is related to trust in parliament, but not
+strongly enough to make the estimates unstable.
+
+# Robustness checks
+
+Each check refits the final model on different rows and compares every odds
+ratio with the final model. The refits share most of their rows with the
+final model, so the differences are described, not tested.
+
+1. **Train set only:** the model fitted on the 80% train set (`06a`) instead
+   of all data. Shows whether the estimates depend on the 80/20 split.
+2. **Complete cases only:** without the 1,348 respondents for whom a missing
+   predictor was filled in (median or mode) in `03_train_test_split.R`. Shows
+   whether filling in missing values changes the estimates.
+3. **Without Latvia round 10:** that survey was self-completed rather than
+   face-to-face. The model handles it with the `lv_r10` indicator, which only
+   shifts the level of life satisfaction in that group. Dropping the group
+   shows whether the survey mode also distorts the effects.
+
+```{r rob}
+labels <- c(train_only = "1. Train set only", complete_cases = "2. Complete cases",
+            without_lv_r10 = "3. Without Latvia R10")
+rob_c %>% group_by(check) %>%
+  summarise(inside = paste(sum(alt_in_ref_ci), "of", n()),
+            median = median(abs(OR_change_pct)),
+            key = max(abs(OR_change_pct[term %in% key_terms])),
+            se = median(se_ratio),
+            sig = sum(sig_change)) %>%
+  arrange(match(check, names(labels))) %>%
+  mutate(check = labels[check], across(c(median, key), ~ round(.x, 1)),
+         se = round(se, 2)) %>%
+  knitr::kable(col.names = c("Check", "Inside final 95% CI", "Median OR change (%)",
+                             "Main determinants, largest (%)", "Median SE ratio",
+                             "Significance changes"))
+```
+
+The main determinants in each version:
+
+```{r rob-key}
+wide <- rob_k %>% select(check, term, OR_ref, OR_alt) %>%
+  tidyr::pivot_wider(names_from = check, values_from = OR_alt)
+knitr::kable(wide, digits = 3,
+             col.names = c("Term", "Final model", labels[names(wide)[-(1:2)]]))
+```
+
+**Result.** Every refitted estimate lies inside the 95% confidence interval of
+the final model. The SE ratio is close to what the change in sample size alone
+would give (for example, about 1.12 for the train set). The only changes in
+significance are for effects with p-values near 0.05 in the final model.
+
+**Conclusion.** The results do not depend on the split, on filling in missing
+values or on the Latvia round 10 survey. Effects with p-values near 0.05
+(Estonia compared with Lithuania, the oldest age group, speaking Russian at
+home, single levels of education, area and social activity) are not stable
+across the checks and should not be presented as findings.
+
+# Limitations for the report
+
+* The 0--10 attitude scales are not linear. Their odds ratios are average
+  trends.
+* For country, age, activity and meeting people the effect differs along the
+  scale. Their odds ratios are average effects.
+* `stfeco` and `stfhlth` are satisfaction ratings close to the outcome. They
+  absorb part of the effects of trust, income and health, and the country
+  effects are those among people who rate the economy equally.
+* Some choices were made after seeing the data (`lv_r10`, the household size
+  cap), and missing predictors were filled in with the median or mode. The
+  robustness checks show that the conclusions do not depend on them.
+* All results are associations, not causal effects.

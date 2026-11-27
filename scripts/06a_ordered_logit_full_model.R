@@ -1,7 +1,8 @@
 # Ordered logit for life satisfaction (stflife 0-10), the full model M3
 # M3 uses all 22 predictors, as the other group models, and its outputs
 # go into the model comparison
-# the wider analysis (other models, checks, M3b) is in 06b_ordered_logit_analysis.R
+# how M3 was built (M1, M2) and the final M3 on all data (odds ratios for the
+# report) are in 06b_ordered_logit_analysis.R, the checks in 06c_ordered_logit_checks.R
 # 06_ordered_logit_documentation.qmd explains how this model is fitted
 # run 01_clean.R and 03_train_test_split.R first, working directory = repo folder
 # input:  data/ess_train.rds (with fold column), data/ess_test.rds,
